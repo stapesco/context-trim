@@ -12,6 +12,7 @@
     "README.md",
     "AGENTS.md",
     "CHANGELOG.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {

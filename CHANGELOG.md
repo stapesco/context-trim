@@ -36,3 +36,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Markdown digest is fenced with language hints inferred from file
   extension. Output is line-numbered but does NOT include per-line line
   numbers — pair with `--json` if you need them.
+
+## [0.1.1] - 2026-08-09
+
+### Fixed
+
+- **Fence selection in the renderer.** The previous fence was ` ``` `
+  regardless of body content, so any file containing its own ` ``` `
+  block (READMEs, docs, source with embedded samples) corrupted the
+  outer digest. Now picks a fence length strictly greater than the
+  longest backtick run in the body (CommonMark-compliant).
+
+- **Symlink-following escaped the scan root.** `walk()` now calls
+  `realpath()` on each symlink and rejects targets outside the
+  canonicalised root. Includes a fix for the macOS `/var -> /private/var`
+  symlink that broke legitimate in-root symlinks.
+
+- **Renderer hardcoded version string.** Now reads `VERSION_STRING`
+  exported from `cli.ts`, so the version in the digest header stays
+  in sync with `package.json`.
+
+- **CLI title with trailing slash.** `root.split("/").pop()` returned
+  `""` for paths ending in `/`, producing ugly "Codebase Context: ..."
+  output. Now strips trailing slashes before deriving the title.
+
+### Added
+
+- `SECURITY.md` with a private disclosure channel (email). No bug
+  bounty; no SLA. Documents the 5-business-day acknowledgement target
+  and 30-day fix target.
+- 9 new tests covering fence selection and symlink scope.

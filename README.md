@@ -193,6 +193,13 @@ the code. Fork it. PRs are not accepted.
 See [AGENTS.md](./AGENTS.md) for machine-readable install instructions and
 the stable `--json` schema.
 
+## Issues
+
+If `stapes-context-trim` doesn't work for you, the fix is most likely in
+the three files under `src/`. Read them, fork, patch.
+
+For security disclosures, see [SECURITY.md](./SECURITY.md).
+
 ## License
 
 MIT
