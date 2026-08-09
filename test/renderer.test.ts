@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderDigest } from "../src/renderer.js";
+import { renderDigest, longestBacktickRun } from "../src/renderer.js";
 import type { ScannedFile } from "../src/scanner.js";
 
 function mkFile(rel: string, size: number, lines: number): ScannedFile {
@@ -73,5 +73,64 @@ describe("renderDigest: total limit", () => {
     expect(result.markdown).toContain("End of digest");
     // Should have stopped before the last file
     expect(result.markdown).not.toContain("## f49.ts");
+  });
+});
+
+describe("renderDigest: fence selection", () => {
+  it("uses a 4-backtick fence when the body contains ``` blocks", async () => {
+    const body = "before\n```js\nconsole.log('inside fence');\n```\nafter\n";
+    const files = [mkFile("nested.md", body.length, 5)];
+    const result = await renderDigest(
+      files,
+      async () => body,
+      { title: "T", root: "/r", totalBytes: body.length, perFileCharLimit: 10000, totalCharLimit: 100000 },
+    );
+    // The outer fence must be longer than the embedded ```` run.
+    // The body contains `````` runs (3 backticks). Outer fence should be 4+.
+    const afterHeader = result.markdown.split("## nested.md\n")[1] ?? "";
+    expect(afterHeader.startsWith("````\n")).toBe(true);
+    // Closing fence must match the opening fence (4 backticks).
+    const closeIdx = afterHeader.lastIndexOf("\n````\n");
+    expect(closeIdx).toBeGreaterThanOrEqual(0);
+  });
+
+  it("uses a 5-backtick fence when the body contains ````` runs", async () => {
+    const body = "before\n`````js\ninside\n`````\nafter\n";
+    const files = [mkFile("nested2.md", body.length, 5)];
+    const result = await renderDigest(
+      files,
+      async () => body,
+      { title: "T", root: "/r", totalBytes: body.length, perFileCharLimit: 10000, totalCharLimit: 100000 },
+    );
+    const afterHeader = result.markdown.split("## nested2.md\n")[1] ?? "";
+    // Body has a 5-backtick run; outer fence should be 6+.
+    expect(afterHeader.startsWith("``````\n")).toBe(true);
+  });
+
+  it("never produces an outer fence shorter than 3 backticks", async () => {
+    const body = "no backticks at all\n";
+    const files = [mkFile("plain.md", body.length, 2)];
+    const result = await renderDigest(
+      files,
+      async () => body,
+      { title: "T", root: "/r", totalBytes: body.length, perFileCharLimit: 10000, totalCharLimit: 100000 },
+    );
+    const afterHeader = result.markdown.split("## plain.md\n")[1] ?? "";
+    expect(afterHeader.startsWith("```\n")).toBe(true);
+  });
+});
+
+describe("longestBacktickRun", () => {
+  it("returns 0 for empty input", () => {
+    expect(longestBacktickRun("")).toBe(0);
+  });
+  it("returns 0 for text with no backticks", () => {
+    expect(longestBacktickRun("plain text\nmore text")).toBe(0);
+  });
+  it("counts the longest run", () => {
+    expect(longestBacktickRun("` `` ``` ```` `````")).toBe(5);
+  });
+  it("handles backticks at the end", () => {
+    expect(longestBacktickRun("text ````")).toBe(4);
   });
 });

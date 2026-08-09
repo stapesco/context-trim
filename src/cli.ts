@@ -19,6 +19,9 @@ import { assertNodeVersion } from "./node-check.js";
 
 const PROGRAM_VERSION = "0.1.0";
 
+/** Re-exported for renderer.ts (avoids a circular import). */
+export const VERSION_STRING = `stapes-context-trim v${PROGRAM_VERSION}`;
+
 interface CliOptions {
   out?: string;
   maxFileBytes: string;
@@ -54,7 +57,7 @@ async function main() {
   const targetArg = program.args[0] ?? ".";
   const opts = program.opts<CliOptions>();
 
-  const root = resolve(targetArg);
+  const root = resolve(targetArg).replace(/\/+$/, ""); // strip trailing slashes
   const startedAt = Date.now();
 
   if (opts.verbose) {
@@ -89,11 +92,12 @@ async function main() {
     return;
   }
 
+  const rootName = root.split("/").pop() || root;
   const digest = await renderDigest(
     files,
     (abs) => readFile(abs, "utf8"),
     {
-      title: `Codebase Context: ${root.split("/").pop() || root}`,
+      title: `Codebase Context: ${rootName}`,
       root,
       totalBytes,
       perFileCharLimit: asInt(opts.perFileChars, 50_000),

@@ -14,7 +14,7 @@ afterEach(async () => {
   await rm(work, { recursive: true, force: true });
 });
 
-async function write(rel: string, content: string): Promise<void> {
+async function write(rel: string, content: string | Buffer): Promise<void> {
   const full = join(work, rel);
   const dir = full.substring(0, full.lastIndexOf("/"));
   if (dir !== work) await mkdir(dir, { recursive: true });
@@ -124,6 +124,35 @@ describe("scan: symlink handling", () => {
     await symlink(join(work, "real.ts"), join(work, "link.ts"));
     const files = await scan({ root: work, maxFileBytes: 1024, followSymlinks: true });
     expect(files.map((f) => f.relPath).sort()).toEqual(["link.ts", "real.ts"]);
+  });
+
+  it("does not follow symlinks that escape the root (file)", async () => {
+    // Create a target file outside the work dir.
+    const outside = join(tmpdir(), `sct-outside-${Date.now()}.ts`);
+    await writeFile(outside, "secret\n", "utf8");
+    try {
+      await symlink(outside, join(work, "evil.ts"));
+      const files = await scan({ root: work, maxFileBytes: 1024, followSymlinks: true });
+      // The escaped symlink must NOT appear in the output.
+      expect(files.map((f) => f.relPath)).not.toContain("evil.ts");
+    } finally {
+      await rm(outside, { force: true });
+    }
+  });
+
+  it("does not follow symlinks that escape the root (directory)", async () => {
+    // Create an outside directory with a file inside.
+    const outsideDir = join(tmpdir(), `sct-outdir-${Date.now()}`);
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(join(outsideDir, "secret.ts"), "secret\n", "utf8");
+    try {
+      await symlink(outsideDir, join(work, "evil-link"));
+      const files = await scan({ root: work, maxFileBytes: 1024, followSymlinks: true });
+      // The escaped directory must NOT contribute files.
+      expect(files.map((f) => f.relPath)).not.toContain("evil-link/secret.ts");
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });
 

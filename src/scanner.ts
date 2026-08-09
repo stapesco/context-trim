@@ -5,7 +5,7 @@
  * lockfiles, and oversized files. Returns the canonical file list.
  */
 
-import { readdir, stat, readFile } from "node:fs/promises";
+import { readdir, stat, readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, basename } from "node:path";
 import createIgnore from "ignore";
 
@@ -95,7 +95,7 @@ function isBinaryBuffer(buf: Buffer): boolean {
 }
 
 /** Recursive directory walk. Yields absolute paths. */
-async function* walk(dir: string, followSymlinks: boolean): AsyncGenerator<string> {
+async function* walk(dir: string, root: string, followSymlinks: boolean): AsyncGenerator<string> {
   const stack: string[] = [dir];
   while (stack.length > 0) {
     const current = stack.pop() as string;
@@ -115,12 +115,17 @@ async function* walk(dir: string, followSymlinks: boolean): AsyncGenerator<strin
       // For symlinks (with followSymlinks enabled), stat the target and dispatch.
       if (entry.isSymbolicLink()) {
         try {
-          const targetStat = await stat(full);
-          if (targetStat.isDirectory()) {
+          const realTarget = await stat(full); // follows symlinks
+          // SECURITY: only follow if the *resolved* target stays inside root.
+          // Without this check, a symlink at `work/evil.ts -> /etc/passwd`
+          // would dump /etc/passwd into the digest.
+          const resolved = await realpath(full);
+          if (!isInsideRoot(resolved, root)) continue;
+          if (realTarget.isDirectory()) {
             stack.push(full);
             continue;
           }
-          if (targetStat.isFile()) {
+          if (realTarget.isFile()) {
             yield full;
             continue;
           }
@@ -132,6 +137,33 @@ async function* walk(dir: string, followSymlinks: boolean): AsyncGenerator<strin
         yield full;
       }
     }
+  }
+}
+
+/**
+ * Lexical check whether `path` is `root` or below it. Both arguments must
+ * already be canonicalised (realpath-resolved) — typically the caller has
+ * just resolved them. This avoids the macOS `/var -> /private/var` trap.
+ */
+function isInsideRoot(path: string, root: string): boolean {
+  const a = path.replace(/\/$/, "");
+  const b = root.replace(/\/$/, "");
+  if (a === b) return true;
+  return a.startsWith(b + "/");
+}
+
+/**
+ * Resolve a root path to its canonical (symlink-resolved) absolute form.
+ * Falls back to plain resolve() if realpath fails (e.g. the path doesn't
+ * exist yet). On macOS this is what avoids `/var` vs `/private/var`
+ * mismatches during symlink-scope checks.
+ */
+async function canonicalRoot(p: string): Promise<string> {
+  const resolved = resolve(p);
+  try {
+    return await realpath(resolved);
+  } catch {
+    return resolved;
   }
 }
 
@@ -149,13 +181,13 @@ async function loadGitignore(root: string) {
 }
 
 export async function scan(options: ScanOptions): Promise<ScannedFile[]> {
-  const root = resolve(options.root);
+  const root = await canonicalRoot(options.root);
   const maxBytes = options.maxFileBytes > 0 ? options.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
   const ig = await loadGitignore(root);
 
   const out: ScannedFile[] = [];
 
-  for await (const abs of walk(root, options.followSymlinks)) {
+  for await (const abs of walk(root, root, options.followSymlinks)) {
     const rel = relative(root, abs);
     const relPosix = rel.split("\\").join("/");
 
