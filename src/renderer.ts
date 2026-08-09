@@ -6,7 +6,7 @@
  */
 
 import type { ScannedFile } from "./scanner.js";
-import { VERSION_STRING } from "./cli.js";
+import { VERSION_STRING } from "./version.js";
 
 export interface DigestOptions {
   title: string;
@@ -26,6 +26,86 @@ export interface DigestResult {
 
 const DEFAULT_PER_FILE_LIMIT = 50_000;
 const DEFAULT_TOTAL_LIMIT = 800_000;
+
+const TRUNCATION_MARKER = (original: number, showing: number): string =>
+  `[truncated: original ${original} chars, showing ${showing}]`;
+
+const LANGUAGE_BY_EXT: ReadonlyMap<string, string> = new Map([
+  [".ts", "ts"],
+  [".tsx", "tsx"],
+  [".js", "js"],
+  [".jsx", "jsx"],
+  [".mjs", "js"],
+  [".cjs", "js"],
+  [".py", "python"],
+  [".rb", "ruby"],
+  [".go", "go"],
+  [".rs", "rust"],
+  [".java", "java"],
+  [".kt", "kotlin"],
+  [".swift", "swift"],
+  [".c", "c"],
+  [".cc", "cpp"],
+  [".cpp", "cpp"],
+  [".h", "c"],
+  [".hpp", "cpp"],
+  [".cs", "csharp"],
+  [".php", "php"],
+  [".html", "html"],
+  [".htm", "html"],
+  [".css", "css"],
+  [".scss", "scss"],
+  [".sass", "sass"],
+  [".less", "less"],
+  [".json", "json"],
+  [".jsonc", "json"],
+  [".yaml", "yaml"],
+  [".yml", "yaml"],
+  [".toml", "toml"],
+  [".ini", "ini"],
+  [".md", "markdown"],
+  [".mdx", "markdown"],
+  [".rst", "rst"],
+  [".sh", "bash"],
+  [".bash", "bash"],
+  [".zsh", "bash"],
+  [".fish", "fish"],
+  [".ps1", "powershell"],
+  [".sql", "sql"],
+  [".graphql", "graphql"],
+  [".gql", "graphql"],
+  [".xml", "xml"],
+  [".svg", "xml"],
+  [".vue", "vue"],
+  [".svelte", "svelte"],
+  [".astro", "astro"],
+  [".dockerfile", "dockerfile"],
+]);
+
+const LANGUAGE_BY_BASENAME: ReadonlyMap<string, string> = new Map([
+  ["Dockerfile", "dockerfile"],
+  ["Containerfile", "dockerfile"],
+  ["Makefile", "makefile"],
+  ["Procfile", "procfile"],
+  ["Justfile", "makefile"],
+  ["CMakeLists.txt", "cmake"],
+]);
+
+/**
+ * Map a file path to a Markdown code-fence info string. Empty string
+ * means no info string. Unknown extensions and untrusted source text
+ * are deliberately NOT used as info strings.
+ */
+export function languageHint(relPath: string): string {
+  const slash = Math.max(relPath.lastIndexOf("/"), relPath.lastIndexOf("\\"));
+  const basename = slash >= 0 ? relPath.substring(slash + 1) : relPath;
+  const byName = LANGUAGE_BY_BASENAME.get(basename);
+  if (byName !== undefined) return byName;
+  const dot = basename.lastIndexOf(".");
+  if (dot < 0) return "";
+  const ext = basename.substring(dot).toLowerCase();
+  return LANGUAGE_BY_EXT.get(ext) ?? "";
+}
 
 export async function renderDigest(
   files: ScannedFile[],
@@ -47,7 +127,21 @@ export async function renderDigest(
     ``,
   ].join("\n");
 
+  const trailer = `\n---\n\nEnd of digest.\n`;
+
+  // The trailer is part of the contract. If user-supplied totalLimit can't
+  // contain the fixed header + trailer, fail loudly — silently exceeding it
+  // would violate the documented cap.
+  if (header.length + trailer.length > totalLimit) {
+    throw new RangeError(
+      `totalCharLimit (${totalLimit}) is too small for the fixed header (${header.length}) ` +
+      `and trailer (${trailer.length}). Minimum is ${header.length + trailer.length}.`,
+    );
+  }
+
   const truncatedFiles: string[] = [];
+  // Header is always emitted. Trailer is reserved up-front so file-budget
+  // accounting is exact.
   const parts: string[] = [header];
   let totalChars = header.length;
   let truncated = false;
@@ -59,21 +153,55 @@ export async function renderDigest(
     } catch {
       body = `(unable to read file)`;
     }
+
+    const originalLength = body.length;
     let truncatedBody = false;
-    if (body.length > perFileLimit) {
-      body = body.substring(0, perFileLimit);
+    let markerText = "";
+    if (originalLength > perFileLimit) {
+      // The marker consumes space inside the per-file budget where practical.
+      // If the configured limit is too small to hold the marker plus at least
+      // one source character, emit the marker anyway and document that the
+      // per-file limit applies to source characters, not metadata. The body
+      // slice is then `perFileLimit` characters long.
+      // Compute the marker length first, then derive the body slice so the
+      // body length is `sliceLen` (not `perFileLimit`) — the marker must
+      // report the ACTUAL emitted source length, not the configured cap.
+      const provisionalMarker = TRUNCATION_MARKER(originalLength, perFileLimit);
+      const reserveForMarker = provisionalMarker.length + 1;
+      const sliceLen = perFileLimit >= reserveForMarker + 1
+        ? perFileLimit - reserveForMarker
+        : perFileLimit;
+      const marker = TRUNCATION_MARKER(originalLength, sliceLen);
+      body = body.substring(0, sliceLen);
+      markerText = `\n${marker}`;
       truncatedBody = true;
     }
 
     const sectionHeader = `## ${file.relPath}\n`;
     // Choose a fence length strictly greater than the longest run of
-    // consecutive backticks in the body, so embedded ``` blocks inside the
-    // file don't terminate our outer fence. CommonMark-compliant.
-    const fenceLen = longestBacktickRun(body) + 1;
+    // consecutive backticks in the (final) body, so embedded ``` blocks
+    // inside the file don't terminate our outer fence. CommonMark-compliant.
+    const backtickBudget = Math.max(longestBacktickRun(body), longestBacktickRun(markerText));
+    const fenceLen = backtickBudget + 1;
     const fence = "`".repeat(Math.max(fenceLen, 3));
-    const section = `${sectionHeader}${fence}\n${body}${fence}\n`;
+    const info = languageHint(file.relPath);
+    const openFence = `${fence}${info}\n`;
 
-    if (totalChars + section.length > totalLimit) {
+    // Normalize body so exactly one newline separates body content from
+    // the closing fence. Strip trailing newlines, then append one.
+    const normalizedBody = body.replace(/\n+$/, "");
+    // The marker (when present) starts on its own line. When absent, the
+    // body line sits directly before the closing fence.
+    const tail = markerText.length > 0
+      ? `\n${markerText}\n${fence}\n`
+      : `\n${fence}\n`;
+    const section = `${sectionHeader}${openFence}${normalizedBody}${tail}`;
+
+    // Total-limit accounting uses the ACTUAL emitted bytes. Each section
+    // already starts with `## <rel>\n` — the newline at the end of the
+    // sectionHeader is the only separator between adjacent sections, and
+    // it is already counted in `section.length`. No phantom separator.
+    if (totalChars + section.length > totalLimit - trailer.length) {
       truncated = true;
       break;
     }
@@ -85,11 +213,10 @@ export async function renderDigest(
     }
   }
 
-  const trailer = `\n---\n\nEnd of digest.\n`;
   parts.push(trailer);
 
   return {
-    markdown: parts.join("\n"),
+    markdown: parts.join(""),
     truncatedFiles,
     truncated,
   };
