@@ -1,7 +1,8 @@
 {
   "name": "stapes-context-trim",
-  "version": "0.1.1",
-  "description": "Strip a codebase to the essentials for an AI prompt. Respects .gitignore. Skips node_modules, lockfiles, binaries, build output. One command, no install, no cloud, no API key. Stable --json summary for AI agents.",
+  "version": "0.1.2",
+  "description": "Strip a codebase to the essentials for an AI prompt. Respects .gitignore. Skips node_modules, lockfiles, binaries, build output. One command, no install, no cloud, no API key. Stable --json summary for AI agents. Tested on Node 24.",
+
   "type": "module",
   "bin": {
     "stapes-context-trim": "dist/cli.js"
