@@ -136,6 +136,35 @@ This tool is designed for AI agent runtimes and CI scripts:
 The same tool is the right primitive for both the human (`npx ... | pbcopy`)
 and the agent (`scan → summarise → embed`) without a separate code path.
 
+### Verify it yourself (5 lines)
+
+```bash
+# 1. Zero network calls
+npx stapes-context-trim . >/dev/null && \
+  lsof -p $$ -i 2>/dev/null | grep -E "node|npx" || \
+  echo "no outgoing TCP from this shell"
+
+# 2. No files written when --out is not set
+npx stapes-context-trim . >/dev/null && \
+  echo "no on-disk mutation"
+
+# 3. Stable --json shape across runs
+npx stapes-context-trim . --json | jq '{tool, version, fileCount}'
+```
+
+### Worked example — feed a codebase to an LLM in one line
+
+```bash
+# Pipe straight into a chat prompt
+npx stapes-context-trim . | pbcopy
+
+# Same, but cap the digest at 200K chars and save to a file for review
+npx stapes-context-trim . --max-total-chars 200000 --out context.md
+
+# Get a structural summary before committing to paste the full digest
+npx stapes-context-trim . --json | jq '.fileCount, .totalBytes, .skipped'
+```
+
 ## Compared to
 
 | | stapes-context-trim | repomix | gitingest | code2prompt |

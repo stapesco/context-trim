@@ -11,6 +11,7 @@
     "dist",
     "README.md",
     "AGENTS.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

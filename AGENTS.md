@@ -91,9 +91,15 @@ export function foo() { return 1; }
 }
 ```
 
-The Markdown digest is for human / LLM consumption. The JSON summary is
-for agent planning: it tells you `fileCount`, `totalBytes`, and what was
-skipped, without forcing the agent to parse the full digest.
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | clean run |
+| 1 | invalid args (e.g. unknown `--max-file-bytes`) |
+| 2 | Node.js too old |
+
+`--version` and `--help` always exit 0 and write only to stdout.
 
 ## Default skip rules
 

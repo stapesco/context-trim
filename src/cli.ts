@@ -15,6 +15,7 @@ import { writeFile } from "node:fs/promises";
 import { scan } from "./scanner.js";
 import { renderDigest } from "./renderer.js";
 import { readFile } from "node:fs/promises";
+import { assertNodeVersion } from "./node-check.js";
 
 const PROGRAM_VERSION = "0.1.0";
 
@@ -34,6 +35,7 @@ function asInt(s: string, fallback: number): number {
 }
 
 async function main() {
+  assertNodeVersion();
   const program = new Command();
   program
     .name("stapes-context-trim")
