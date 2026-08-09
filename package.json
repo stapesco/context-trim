@@ -1,7 +1,7 @@
 {
   "name": "stapes-context-trim",
   "version": "0.1.0",
-  "description": "Strip a codebase down to the essentials for an AI prompt. Respects .gitignore. Zero config. Zero cloud.",
+  "description": "Strip a codebase to the essentials for an AI prompt. Respects .gitignore. Skips node_modules, lockfiles, binaries, build output. One command, no install, no cloud, no API key. Stable --json summary for AI agents.",
   "type": "module",
   "bin": {
     "stapes-context-trim": "dist/cli.js"
@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "README.md",
+    "AGENTS.md",
     "LICENSE"
   ],
   "scripts": {
@@ -22,14 +23,32 @@
   "keywords": [
     "ai",
     "llm",
-    "context",
+    "claude",
+    "gpt",
+    "context-window",
     "codebase",
     "prompt",
+    "markdown-digest",
     "repomix",
     "code2prompt",
+    "gitingest",
+    "ai-agent",
+    "cli",
+    "npx",
+    "zero-config",
+    "gitignore",
     "stapes"
   ],
   "license": "MIT",
+  "author": "stapesco <github@stapes.co.za>",
+  "homepage": "https://github.com/stapesco/context-trim",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stapesco/context-trim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stapesco/context-trim"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
