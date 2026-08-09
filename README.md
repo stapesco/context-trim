@@ -61,7 +61,7 @@ stapes-context-trim . --verbose                  # log progress to stderr
 
 ## Source
 
-Visible at https://github.com/stapesco/context-trim. One-person brand project. Read the code. Fork it. PRs are not accepted.
+Visible at https://github.com/stapesco/context-trim. Built by stapes. Read the code. Fork it. PRs are not accepted.
 
 ## License
 
