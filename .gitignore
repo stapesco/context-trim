@@ -8,3 +8,5 @@ dist/
 *.tsbuildinfo
 coverage/
 .vitest-cache/
+.claude/
+.deepsec/

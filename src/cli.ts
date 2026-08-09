@@ -9,32 +9,50 @@
  * --out writes to a file instead. Use --clipboard (later) if we add it.
  */
 
-import { Command } from "commander";
-import { resolve } from "node:path";
+import { Command, InvalidArgumentError } from "commander";
+import { basename, resolve } from "node:path";
 import { writeFile } from "node:fs/promises";
 import { scan } from "./scanner.js";
 import { renderDigest } from "./renderer.js";
 import { readFile } from "node:fs/promises";
 import { assertNodeVersion } from "./node-check.js";
-
-const PROGRAM_VERSION = "0.1.0";
-
-/** Re-exported for renderer.ts (avoids a circular import). */
-export const VERSION_STRING = `stapes-context-trim v${PROGRAM_VERSION}`;
+import { PROGRAM_VERSION } from "./version.js";
 
 interface CliOptions {
   out?: string;
-  maxFileBytes: string;
-  maxTotalChars: string;
-  perFileChars: string;
+  maxFileBytes: number;
+  maxTotalChars: number;
+  perFileChars: number;
   followSymlinks: boolean;
   verbose: boolean;
   json: boolean;
 }
 
-function asInt(s: string, fallback: number): number {
-  const n = parseInt(s, 10);
-  return Number.isFinite(n) ? n : fallback;
+const DEFAULT_MAX_FILE_BYTES = 204800;
+const DEFAULT_PER_FILE_CHARS = 50000;
+const DEFAULT_MAX_TOTAL_CHARS = 800000;
+
+/**
+ * Parse a numeric CLI flag as a strict positive integer.
+ * Throws an InvalidArgumentError that commander surfaces with the option name
+ * and the word "option" in the error message, so callers can distinguish
+ * invalid input from a missing default. No fallback hides malformed input.
+ */
+function positiveInt(value: string, optionName: string): number {
+  // Reject empty, whitespace, signed, decimal, hex, or exponent input.
+  // Only accept a base-10 positive integer with an optional leading +.
+  if (!/^\+?\d+$/.test(value)) {
+    throw new InvalidArgumentError(
+      `option '${optionName}' value '${value}' is not a positive integer`,
+    );
+  }
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new InvalidArgumentError(
+      `option '${optionName}' value '${value}' is not a positive integer`,
+    );
+  }
+  return n;
 }
 
 async function main() {
@@ -46,9 +64,24 @@ async function main() {
     .version(PROGRAM_VERSION)
     .argument("[path]", "directory to scan", ".")
     .option("-o, --out <file>", "write digest to file instead of stdout")
-    .option("--max-file-bytes <n>", "skip files larger than N bytes", "204800")
-    .option("--per-file-chars <n>", "truncate file body at N characters", "50000")
-    .option("--max-total-chars <n>", "stop emitting once digest exceeds N chars", "800000")
+    .option(
+      "--max-file-bytes <n>",
+      "skip files larger than N bytes",
+      (v) => positiveInt(v, "--max-file-bytes"),
+      DEFAULT_MAX_FILE_BYTES,
+    )
+    .option(
+      "--per-file-chars <n>",
+      "truncate file body at N characters",
+      (v) => positiveInt(v, "--per-file-chars"),
+      DEFAULT_PER_FILE_CHARS,
+    )
+    .option(
+      "--max-total-chars <n>",
+      "stop emitting once digest exceeds N chars",
+      (v) => positiveInt(v, "--max-total-chars"),
+      DEFAULT_MAX_TOTAL_CHARS,
+    )
     .option("--follow-symlinks", "follow symlinks (off by default)", false)
     .option("-v, --verbose", "log progress to stderr", false)
     .option("--json", "emit JSON summary instead of markdown", false)
@@ -57,16 +90,17 @@ async function main() {
   const targetArg = program.args[0] ?? ".";
   const opts = program.opts<CliOptions>();
 
-  const root = resolve(targetArg).replace(/\/+$/, ""); // strip trailing slashes
+  // Resolve the user-provided path; the canonical realpath comes from scan().
+  const root = resolve(targetArg);
   const startedAt = Date.now();
 
   if (opts.verbose) {
     console.error(`scanning ${root}`);
   }
 
-  const files = await scan({
+  const { root: scannedRoot, files, skipped } = await scan({
     root,
-    maxFileBytes: asInt(opts.maxFileBytes, 200 * 1024),
+    maxFileBytes: opts.maxFileBytes,
     followSymlinks: opts.followSymlinks,
   });
 
@@ -80,28 +114,29 @@ async function main() {
     const summary = {
       tool: "stapes-context-trim",
       version: PROGRAM_VERSION,
-      root,
+      root: scannedRoot,
       fileCount: files.length,
       totalBytes,
-      durationMs: Date.now() - startedAt,
+      elapsedMs: Date.now() - startedAt,
+      skipped,
       fileList: files.map((f) => ({ path: f.relPath, size: f.size, lines: f.lines })),
     };
-    const out = JSON.stringify(summary, null, 2);
+    const out = JSON.stringify(summary, null, 2) + "\n";
     if (opts.out) await writeFile(opts.out, out, "utf8");
-    else process.stdout.write(out + "\n");
+    else process.stdout.write(out);
     return;
   }
 
-  const rootName = root.split("/").pop() || root;
+  const rootName = basename(scannedRoot) || scannedRoot;
   const digest = await renderDigest(
     files,
     (abs) => readFile(abs, "utf8"),
     {
       title: `Codebase Context: ${rootName}`,
-      root,
+      root: scannedRoot,
       totalBytes,
-      perFileCharLimit: asInt(opts.perFileChars, 50_000),
-      totalCharLimit: asInt(opts.maxTotalChars, 800_000),
+      perFileCharLimit: opts.perFileChars,
+      totalCharLimit: opts.maxTotalChars,
     },
   );
 

@@ -1,12 +1,12 @@
 /**
  * File discovery and filtering for the context-trim CLI.
  *
- * Walks a directory tree, applies .gitignore patterns, skips binaries,
- * lockfiles, and oversized files. Returns the canonical file list.
+ * Walks a directory tree, applies hierarchical .gitignore patterns, skips
+ * binaries, lockfiles, and oversized files. Returns the canonical scan result.
  */
 
-import { readdir, stat, readFile, realpath } from "node:fs/promises";
-import { join, relative, resolve, basename } from "node:path";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { basename, join, relative, resolve } from "node:path";
 import createIgnore from "ignore";
 
 export interface ScanOptions {
@@ -16,20 +16,38 @@ export interface ScanOptions {
 }
 
 export interface ScannedFile {
-  path: string;        // absolute
-  relPath: string;     // relative to root, forward slashes
-  size: number;        // bytes
-  lines: number;       // line count (newline-delimited)
+  path: string;
+  relPath: string;
+  size: number;
+  lines: number;
 }
 
-const DEFAULT_MAX_FILE_BYTES = 200 * 1024; // 200 KB
+export interface SkipCounts {
+  binary: number;
+  lockfile: number;
+  tooLarge: number;
+  gitignored: number;
+}
+
+export interface ScanResult {
+  root: string;
+  files: ScannedFile[];
+  skipped: SkipCounts;
+}
+
+interface IgnoreContext {
+  baseRel: string;
+  matcher: ReturnType<typeof createIgnore>;
+}
+
+interface WalkedFile {
+  path: string;
+  ignoreContexts: IgnoreContext[];
+}
+
+const DEFAULT_MAX_FILE_BYTES = 200 * 1024;
 const BINARY_SAMPLE_BYTES = 8192;
 
-/**
- * Patterns we always exclude regardless of .gitignore.
- * Lockfiles are noise. Common dependency directories are noise.
- * VCS internals are noise. Minified blobs are noise.
- */
 const ALWAYS_EXCLUDE: RegExp[] = [
   /(^|\/)\.git(\/|$)/,
   /(^|\/)\.hg(\/|$)/,
@@ -44,15 +62,18 @@ const ALWAYS_EXCLUDE: RegExp[] = [
   /(^|\/)\.claude(\/|$)/,
   /(^|\/)\.playwright-mcp(\/|$)/,
   /(^|\/)__pycache__(\/|$)/,
-  /(^|\/)target(\/|$)/,            // rust
+  /(^|\/)target(\/|$)/,
   /(^|\/)dist(\/|$)/,
   /(^|\/)build(\/|$)/,
+  /(^|\/)out(\/|$)/,
   /(^|\/)coverage(\/|$)/,
   /(^|\/)\.vite(\/|$)/,
-  /(^|\/)vendor(\/|$)/,            // php, go
+  /(^|\/)vendor(\/|$)/,
+  /(^|\/)[^/]+\.min\.js$/i,
+  /(^|\/)[^/]+\.min\.css$/i,
 ];
 
-const LOCKFILE_NAMES: Set<string> = new Set([
+const LOCKFILE_NAMES = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
@@ -67,10 +88,6 @@ const LOCKFILE_NAMES: Set<string> = new Set([
   "go.sum",
 ]);
 
-/**
- * File extensions we treat as text. Anything not here is binary and skipped.
- * We do NOT trust the extension blindly — binary sniff via first 8KB.
- */
 const TEXT_EXT_HINT = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
@@ -83,83 +100,114 @@ const TEXT_EXT_HINT = new Set([
   ".xml", ".svg", ".vue", ".svelte", ".astro",
   ".env.example", ".gitignore", ".gitattributes", ".editorconfig",
   ".dockerfile", "Dockerfile", ".containerfile", "Containerfile",
+  "Makefile", "Procfile", "Justfile", "CMakeLists.txt",
 ]);
 
-/** Check whether file content is binary by sniffing the first bytes for NUL. */
-function isBinaryBuffer(buf: Buffer): boolean {
-  const sample = buf.subarray(0, Math.min(buf.length, BINARY_SAMPLE_BYTES));
-  for (let i = 0; i < sample.length; i++) {
-    if (sample[i] === 0) return true;
+function isBinaryBuffer(buffer: Buffer): boolean {
+  const sample = buffer.subarray(0, Math.min(buffer.length, BINARY_SAMPLE_BYTES));
+  for (let index = 0; index < sample.length; index++) {
+    if (sample[index] === 0) return true;
   }
   return false;
 }
 
-/** Recursive directory walk. Yields absolute paths. */
-async function* walk(dir: string, root: string, followSymlinks: boolean): AsyncGenerator<string> {
-  const stack: string[] = [dir];
+async function loadIgnoreContext(directory: string, root: string): Promise<IgnoreContext | undefined> {
+  try {
+    const content = await readFile(join(directory, ".gitignore"), "utf8");
+    return {
+      baseRel: relative(root, directory).split("\\").join("/"),
+      matcher: createIgnore().add(content),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function contextPath(context: IgnoreContext, relPath: string): string | undefined {
+  if (context.baseRel === "") return relPath;
+  const prefix = `${context.baseRel}/`;
+  return relPath.startsWith(prefix) ? relPath.slice(prefix.length) : undefined;
+}
+
+function isGitignored(relPath: string, contexts: IgnoreContext[]): boolean {
+  let ignored = false;
+  for (const context of contexts) {
+    const localPath = contextPath(context, relPath);
+    if (localPath === undefined || localPath === "") continue;
+    const result = context.matcher.test(localPath);
+    if (result.ignored) ignored = true;
+    if (result.unignored) ignored = false;
+  }
+  return ignored;
+}
+
+async function* walk(
+  root: string,
+  followSymlinks: boolean,
+): AsyncGenerator<WalkedFile> {
+  const stack: Array<{ directory: string; ignoreContexts: IgnoreContext[] }> = [
+    { directory: root, ignoreContexts: [] },
+  ];
+  const visitedDirectories = new Set<string>();
+
   while (stack.length > 0) {
-    const current = stack.pop() as string;
-    let entries;
+    const current = stack.pop();
+    if (current === undefined) break;
+
+    let canonicalDirectory: string;
     try {
-      entries = await readdir(current, { withFileTypes: true });
+      canonicalDirectory = await realpath(current.directory);
     } catch {
       continue;
     }
+    if (visitedDirectories.has(canonicalDirectory)) continue;
+    visitedDirectories.add(canonicalDirectory);
+
+    const localContext = await loadIgnoreContext(current.directory, root);
+    const ignoreContexts = localContext === undefined
+      ? current.ignoreContexts
+      : [...current.ignoreContexts, localContext];
+
+    let entries;
+    try {
+      entries = await readdir(current.directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
     for (const entry of entries) {
-      const full = join(current, entry.name);
-      if (entry.isSymbolicLink() && !followSymlinks) continue;
-      if (entry.isDirectory()) {
-        stack.push(full);
-        continue;
-      }
-      // For symlinks (with followSymlinks enabled), stat the target and dispatch.
+      const full = join(current.directory, entry.name);
       if (entry.isSymbolicLink()) {
+        if (!followSymlinks) continue;
         try {
-          const realTarget = await stat(full); // follows symlinks
-          // SECURITY: only follow if the *resolved* target stays inside root.
-          // Without this check, a symlink at `work/evil.ts -> /etc/passwd`
-          // would dump /etc/passwd into the digest.
           const resolved = await realpath(full);
           if (!isInsideRoot(resolved, root)) continue;
-          if (realTarget.isDirectory()) {
-            stack.push(full);
-            continue;
-          }
-          if (realTarget.isFile()) {
-            yield full;
-            continue;
+          const target = await stat(full);
+          if (target.isDirectory()) {
+            stack.push({ directory: full, ignoreContexts });
+          } else if (target.isFile()) {
+            yield { path: full, ignoreContexts };
           }
         } catch {
           continue;
         }
-      }
-      if (entry.isFile()) {
-        yield full;
+      } else if (entry.isDirectory()) {
+        stack.push({ directory: full, ignoreContexts });
+      } else if (entry.isFile()) {
+        yield { path: full, ignoreContexts };
       }
     }
   }
 }
 
-/**
- * Lexical check whether `path` is `root` or below it. Both arguments must
- * already be canonicalised (realpath-resolved) — typically the caller has
- * just resolved them. This avoids the macOS `/var -> /private/var` trap.
- */
 function isInsideRoot(path: string, root: string): boolean {
-  const a = path.replace(/\/$/, "");
-  const b = root.replace(/\/$/, "");
-  if (a === b) return true;
-  return a.startsWith(b + "/");
+  const candidate = path.replace(/\/$/, "");
+  const canonicalRoot = root.replace(/\/$/, "");
+  return candidate === canonicalRoot || candidate.startsWith(`${canonicalRoot}/`);
 }
 
-/**
- * Resolve a root path to its canonical (symlink-resolved) absolute form.
- * Falls back to plain resolve() if realpath fails (e.g. the path doesn't
- * exist yet). On macOS this is what avoids `/var` vs `/private/var`
- * mismatches during symlink-scope checks.
- */
-async function canonicalRoot(p: string): Promise<string> {
-  const resolved = resolve(p);
+async function canonicalRoot(path: string): Promise<string> {
+  const resolved = resolve(path);
   try {
     return await realpath(resolved);
   } catch {
@@ -167,92 +215,71 @@ async function canonicalRoot(p: string): Promise<string> {
   }
 }
 
-/** Load .gitignore from the root if present. Returns an "ignore" instance. */
-async function loadGitignore(root: string) {
-  const ig = createIgnore();
-  const gitignorePath = join(root, ".gitignore");
-  try {
-    const content = await readFile(gitignorePath, "utf8");
-    ig.add(content);
-  } catch {
-    // No .gitignore — fine, we'll just skip our ALWAYS_EXCLUDE patterns.
-  }
-  return ig;
-}
-
-export async function scan(options: ScanOptions): Promise<ScannedFile[]> {
+export async function scan(options: ScanOptions): Promise<ScanResult> {
   const root = await canonicalRoot(options.root);
   const maxBytes = options.maxFileBytes > 0 ? options.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
-  const ig = await loadGitignore(root);
+  const files: ScannedFile[] = [];
+  const skipped: SkipCounts = { binary: 0, lockfile: 0, tooLarge: 0, gitignored: 0 };
 
-  const out: ScannedFile[] = [];
+  for await (const walkedFile of walk(root, options.followSymlinks)) {
+    const relPath = relative(root, walkedFile.path).split("\\").join("/");
 
-  for await (const abs of walk(root, root, options.followSymlinks)) {
-    const rel = relative(root, abs);
-    const relPosix = rel.split("\\").join("/");
-
-    // Always-exclude patterns
-    let excluded = false;
-    for (const pat of ALWAYS_EXCLUDE) {
-      if (pat.test(relPosix)) { excluded = true; break; }
+    if (ALWAYS_EXCLUDE.some((pattern) => pattern.test(relPath))) continue;
+    if (isGitignored(relPath, walkedFile.ignoreContexts)) {
+      skipped.gitignored++;
+      continue;
     }
-    if (excluded) continue;
+    if (LOCKFILE_NAMES.has(basename(relPath))) {
+      skipped.lockfile++;
+      continue;
+    }
 
-    // .gitignore
-    if (ig.ignores(relPosix)) continue;
-
-    // Lockfile names — skip regardless of gitignore
-    if (LOCKFILE_NAMES.has(basename(relPosix))) continue;
-
-    let s;
+    let fileStat;
     try {
-      s = await stat(abs);
+      fileStat = await stat(walkedFile.path);
     } catch {
       continue;
     }
-    if (!s.isFile()) continue;
-    if (s.size === 0) continue; // empty files are noise
-    if (s.size > maxBytes) continue;
+    if (!fileStat.isFile() || fileStat.size === 0) continue;
+    if (fileStat.size > maxBytes) {
+      skipped.tooLarge++;
+      continue;
+    }
 
-    // Extension hint: skip obviously binary extensions to avoid the
-    // open+sniff cost on the bulk of files.
-    const dotIdx = relPosix.lastIndexOf(".");
-    const ext = dotIdx >= 0 ? relPosix.substring(dotIdx).toLowerCase() : "";
-    const base = basename(relPosix);
-    const looksText = TEXT_EXT_HINT.has(ext) || TEXT_EXT_HINT.has(base);
-    if (!looksText) continue;
+    const dotIndex = relPath.lastIndexOf(".");
+    const extension = dotIndex >= 0 ? relPath.substring(dotIndex).toLowerCase() : "";
+    const name = basename(relPath);
+    if (!TEXT_EXT_HINT.has(extension) && !TEXT_EXT_HINT.has(name)) continue;
 
-    // Binary sniff — read first 8KB.
-    let fd;
+    let content;
     try {
-      fd = await readFile(abs);
+      content = await readFile(walkedFile.path);
     } catch {
       continue;
     }
-    if (isBinaryBuffer(fd)) continue;
+    if (isBinaryBuffer(content)) {
+      skipped.binary++;
+      continue;
+    }
 
-    const lines = countLines(fd.toString("utf8"));
-    out.push({
-      path: abs,
-      relPath: relPosix,
-      size: s.size,
-      lines,
+    files.push({
+      path: walkedFile.path,
+      relPath,
+      size: fileStat.size,
+      lines: countLines(content.toString("utf8")),
     });
   }
 
-  // Sort by relative path for deterministic output.
-  out.sort((a, b) => a.relPath.localeCompare(b.relPath));
-  return out;
+  files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return { root, files, skipped };
 }
 
-/** Count newline-terminated lines. Works for both LF and CRLF. */
 export function countLines(text: string): number {
   if (text.length === 0) return 0;
-  let n = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) n++;
+  let lines = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text.charCodeAt(index) === 10) lines++;
   }
-  // Trailing content after the last newline counts as one line.
-  if (text.charCodeAt(text.length - 1) !== 10) n++;
-  return n;
+  if (text.charCodeAt(text.length - 1) !== 10) lines++;
+  return lines;
 }

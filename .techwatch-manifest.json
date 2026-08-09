@@ -1,6 +1,6 @@
 {
   "name": "stapes-context-trim",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "manifest_kind": "stack-freshness",
   "node": {
     "minimum": "18.0.0",
