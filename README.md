@@ -1,43 +1,52 @@
 # stapes-context-trim
 
-Strip a codebase down to the essentials for an AI prompt. Zero cloud. Zero config.
+> AI coding assistants have token budgets. Your codebase does not. Every time you paste a repo into a chat, you fight the model context window — `node_modules`, lockfiles, binaries, build output, all of it.
+>
+> `stapes-context-trim` walks the tree, respects `.gitignore`, skips the noise, and emits one Markdown digest. One command. No cloud. No config.
 
-When you paste a repo into an AI chat, the prompt gets bloated with `node_modules`, lockfiles, and binaries. This tool walks a directory, respects `.gitignore`, skips the noise, and emits a single Markdown digest you can paste into any LLM.
+## Why
 
-## Install
+The standard pattern is "copy the repo and paste it in." That works on a 200-file project. It fails on a 5,000-file monorepo. The model truncates the middle of the prompt. The rest is noise.
+
+This tool solves that. It runs locally, in milliseconds, on any tree. It writes one Markdown file with one section per source file. The model gets exactly the code that matters.
+
+The output format is stable and human-readable:
+
+```
+# Codebase Context: my-project
+
+Files: 247
+Bytes: 482103
+
+---
+
+## src/index.ts
+export const main = () => {
+  console.log("ready");
+};
+
+## src/util.ts
+export const add = (a: number, b: number) => a + b;
+
+End of digest.
+```
+
+Each section is `## <relative path>` plus the file contents in a fenced block. Files larger than `--per-file-chars` get truncated. Files past `--max-total-chars` get dropped.
+
+## How
 
 ```bash
 npx stapes-context-trim [path]
 ```
 
-That's it. No API key. No account. No telemetry. No data leaves your machine.
-
-To install permanently:
+Defaults: scan `.`, emit Markdown to stdout, skip anything over 200 KB.
 
 ```bash
-npm install -g stapes-context-trim
-```
-
-## Usage
-
-```bash
-# Scan the current directory, print Markdown digest to stdout.
-stapes-context-trim
-
-# Scan a specific path.
-stapes-context-trim ./packages/api
-
-# Write the digest to a file.
-stapes-context-trim . --out context.md
-
-# JSON summary instead of markdown.
-stapes-context-trim . --json
-
-# Tune the size limits. Useful when the digest would exceed your model's context window.
-stapes-context-trim . --max-file-bytes 50000 --per-file-chars 20000 --max-total-chars 200000
-
-# Verbose mode — logs progress to stderr.
-stapes-context-trim . --verbose
+# Common options
+stapes-context-trim . --out context.md          # write to a file
+stapes-context-trim . --json                     # JSON summary instead
+stapes-context-trim . --max-total-chars 200000   # cap the digest
+stapes-context-trim . --verbose                  # log progress to stderr
 ```
 
 ## What it skips
@@ -47,17 +56,13 @@ stapes-context-trim . --verbose
 - Lockfiles: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `composer.lock`, `Gemfile.lock`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `go.sum`, `bun.lock`, `bun.lockb`
 - Files larger than `--max-file-bytes` (default 200 KB)
 - Empty files
-- Binary files (detected by NUL byte in the first 8 KB)
-- Symlinks (unless `--follow-symlinks` is passed)
+- Binary files (NUL byte in the first 8 KB)
+- Symlinks (unless `--follow-symlinks`)
 
-## Output format
+## Source
 
-A Markdown digest with one fenced code block per file. The header shows the root, file count, and total bytes. Each section is `## <relative path>` followed by the file contents in a fenced block. Files exceeding `--per-file-chars` are truncated and noted in a summary. Files beyond the `--max-total-chars` budget are not emitted at all.
-
-## Why
-
-The closest comparable tool is [repomix](https://github.com/yamadashy/repomix). Repomix ships more features. `stapes-context-trim` exists for users who want a single-purpose CLI with no config file, no compression choices, and only two runtime deps.
+Visible at https://github.com/stapesco/context-trim. One-person brand project. Read the code. Fork it. PRs are not accepted.
 
 ## License
 
-MIT. Source available at [github.com/stapesco/context-trim](https://github.com/stapesco/context-trim). No PRs accepted. Fork it.
+MIT
