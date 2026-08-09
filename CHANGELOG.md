@@ -108,3 +108,26 @@ tag now derive from a single source of truth (`src/version.ts` and
   truncation marker accuracy, total-limit accounting, CLI JSON
   contract, strict numeric flag parsing, and release-tag guard. The
   suite runs from `npm test` and is the gate before publish.
+
+## [0.1.2] - 2026-08-09
+
+Patch release: switch the release workflow and tested runtime to
+Node 24 (active LTS). The supported floor stays at Node 18 so
+existing consumers on Node 18-22 keep working without changes.
+
+### Changed
+
+- Release workflow pinned to `node-version: "24"`. The previous
+  Node 20 pin is end-of-life (2026-04-30).
+- `.techwatch-manifest.json` reports `node.tested = "24.0.0"` and
+  bumps the package version to `0.1.2`. `last_reviewed` refreshed.
+- `package.json` description notes "Tested on Node 24".
+- `src/node-check.ts` header documents the recommended runtime.
+  The supported minimum stays at 18.
+
+### Verification
+
+- `npm run lint`, `npm run build`, and `npm test` pass on the local
+  toolchain (Node 25.9.0 cross-runtime smoke).
+- Release workflow re-runs on the new pinned runtime and publishes
+  `stapes-context-trim@0.1.2`.
