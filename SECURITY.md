@@ -25,6 +25,17 @@ There is **no bug bounty programme** and **no reward** for disclosure.
 The maintainer fixes issues because they are bugs, not because the
 maintainer buys silence.
 
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| 0.1.3 | yes |
+| 0.1.2, 0.1.1, 0.1.0 | no |
+
+The supported Node.js floor is **22.12.0**. The tool exits with code 2 on
+anything older. Node 18 and Node 20 are both end-of-life, so the floor
+moved up with the 0.1.3 release.
+
 ## Out of scope
 
 - Lack of a feature. Open a discussion elsewhere, not a security report
@@ -42,6 +53,9 @@ The maintainer triages and lets you know.
 at and writes the aggregated digest to stdout or to a file you specify
 with `--out`. The tool does not phone home, does not log, and does not
 retain file contents.
+
+The `--out` target is excluded from the scan, so the digest the tool
+writes is never read back as source.
 
 The two attack surfaces worth reporting:
 

@@ -10,3 +10,6 @@ coverage/
 .vitest-cache/
 .claude/
 .deepsec/
+.craft/
+graphify-out/
+CLAUDE.md

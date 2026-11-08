@@ -5,6 +5,46 @@ All notable changes to `stapes-context-trim` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-11-08
+
+### Changed
+
+- **Supported Node floor is now 22.12.0.** Node 18 and Node 20 are both
+  end-of-life. The version check compares the full version rather than the
+  major, so a Node 22.0.0 runtime is rejected instead of failing later
+  inside a dependency. The exit code stays 2.
+- **Dependencies refreshed.** `commander` 11 → 15, `ignore` 5 → 7,
+  `vitest` 1 → 5, `typescript` 5 → 7, `@types/node` 20 → 26. The
+  `vitest` 1 → 5 jump clears the last three advisories in the
+  development dependency tree: a critical prototype-pollution RCE in
+  `tinypool`, a high-severity denial of service in `source-map-js`, and
+  a moderate advisory in `esbuild`. `npm audit` now reports zero
+  vulnerabilities across both the runtime and the development tree.
+- **GitHub Actions moved off the Node 20 runtime.** `actions/checkout`
+  and `actions/setup-node` v4 → v5, `softprops/action-gh-release` v2 → v3.
+- **`--json` gained three `skipped` counters.** `unsupportedType`,
+  `empty`, and `excluded` join `binary`, `lockfile`, `tooLarge`, and
+  `gitignored`. Every file the scan does not return is now accounted
+  for in exactly one counter.
+
+### Fixed
+
+- **The digest scanned its own output.** With `--out` inside the scan
+  root, the file written by one run was scanned as source by the next,
+  so the digest grew with every invocation. The `--out` target is now
+  excluded from the scan.
+- **A wrong scan path exited 0 with an empty digest.** A typo produced
+  "your codebase has no files" instead of an error. A path that does
+  not exist, or that is a file rather than a directory, now exits 1
+  with a clear message.
+- **File order varied by locale.** The scan sorted paths with
+  `localeCompare`, so the same repository produced a different order
+  under a different `LC_ALL`. Paths are now ordered by UTF-16 code unit,
+  which is identical on every machine.
+- **Files dropped for an unrecognised extension, for being empty, or
+  for sitting in an always-excluded directory were counted nowhere.**
+  They now increment their own `skipped` counter.
+
 ## [0.1.0] - 2026-08-09
 
 ### Added

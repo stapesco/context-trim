@@ -6,13 +6,19 @@
  */
 
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import createIgnore from "ignore";
 
 export interface ScanOptions {
   root: string;
   maxFileBytes: number;
   followSymlinks: boolean;
+  /**
+   * Absolute paths to exclude from the scan. Used to keep the digest the
+   * tool writes out of its own input, which otherwise makes each run grow
+   * the next one's output.
+   */
+  excludePaths?: string[];
 }
 
 export interface ScannedFile {
@@ -27,6 +33,12 @@ export interface SkipCounts {
   lockfile: number;
   tooLarge: number;
   gitignored: number;
+  /** Dropped because the extension or filename is not a recognised text type. */
+  unsupportedType: number;
+  /** Dropped because the file is empty. */
+  empty: number;
+  /** Dropped by the always-excluded directory and minified-asset rules. */
+  excluded: number;
 }
 
 export interface ScanResult {
@@ -47,6 +59,10 @@ interface WalkedFile {
 
 const DEFAULT_MAX_FILE_BYTES = 200 * 1024;
 const BINARY_SAMPLE_BYTES = 8192;
+/** The LF character code. Lines are counted by LF, not by CRLF. */
+const LINE_FEED = 10;
+/** The default when a caller passes no paths to exclude. */
+const NO_EXCLUDED_PATHS: readonly string[] = [];
 
 const ALWAYS_EXCLUDE: RegExp[] = [
   /(^|\/)\.git(\/|$)/,
@@ -215,22 +231,130 @@ async function canonicalRoot(path: string): Promise<string> {
   }
 }
 
+/**
+ * Resolve the scan root and confirm it is a directory that exists.
+ *
+ * A missing or non-directory root throws instead of yielding an empty scan,
+ * so a caller can tell "this directory has no files" from "you pointed me at
+ * the wrong path".
+ */
+async function requireDirectory(path: string): Promise<string> {
+  const resolved = resolve(path);
+  let stats;
+  try {
+    stats = await stat(resolved);
+  } catch {
+    throw new Error(`scan path does not exist: ${resolved}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`scan path is not a directory: ${resolved}`);
+  }
+  return canonicalRoot(resolved);
+}
+
+/**
+ * Compare two paths by UTF-16 code unit.
+ *
+ * `localeCompare` is locale-sensitive, so the same repository produced a
+ * different file order under a different `LC_ALL`. The `--json` contract
+ * promises a stable shape, and agents diff these outputs, so the order must
+ * not depend on the machine's locale.
+ */
+export function comparePaths(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * The set of paths a scan must not return.
+ *
+ * Both the absolute form and the root-relative form are kept. The relative
+ * form is what the walk compares against, so the exclusion still holds when
+ * the scan root is reached through a symlink. A relative exclude path is
+ * resolved against the scan root, which is what a caller naming a path
+ * inside the tree means.
+ */
+interface ExclusionSet {
+  absolute: Set<string>;
+  relative: Set<string>;
+}
+
+async function buildExclusions(root: string, excludePaths: readonly string[]): Promise<ExclusionSet> {
+  const absolute = new Set<string>();
+  const relativePaths = new Set<string>();
+
+  for (const excludedPath of excludePaths) {
+    const resolved = isAbsolute(excludedPath) ? excludedPath : resolve(root, excludedPath);
+    const candidates: string[] = [];
+    try {
+      candidates.push(await realpath(resolved));
+    } catch {
+      // The file may not exist yet (the tool writes it after scanning).
+    }
+    candidates.push(resolved);
+
+    for (const candidate of candidates) {
+      absolute.add(candidate);
+      const rel = relative(root, candidate).split("\\").join("/");
+      if (rel !== "" && !rel.startsWith("..")) {
+        relativePaths.add(rel);
+      }
+    }
+  }
+
+  return { absolute, relative: relativePaths };
+}
+
+/**
+ * The reason a walked file did not make it into the scan result, or null
+ * when the file is kept.
+ */
+type DropReason = keyof SkipCounts;
+
+function classifyByName(relPath: string, ignoreContexts: IgnoreContext[]): DropReason | null {
+  if (ALWAYS_EXCLUDE.some((pattern) => pattern.test(relPath))) return "excluded";
+  if (isGitignored(relPath, ignoreContexts)) return "gitignored";
+  if (LOCKFILE_NAMES.has(basename(relPath))) return "lockfile";
+  return null;
+}
+
+function classifyByContent(relPath: string, size: number, maxBytes: number): DropReason | null {
+  if (size === 0) return "empty";
+  if (size > maxBytes) return "tooLarge";
+  const dotIndex = relPath.lastIndexOf(".");
+  const extension = dotIndex >= 0 ? relPath.substring(dotIndex).toLowerCase() : "";
+  const name = basename(relPath);
+  if (!TEXT_EXT_HINT.has(extension) && !TEXT_EXT_HINT.has(name)) return "unsupportedType";
+  return null;
+}
+
 export async function scan(options: ScanOptions): Promise<ScanResult> {
-  const root = await canonicalRoot(options.root);
+  const root = await requireDirectory(options.root);
   const maxBytes = options.maxFileBytes > 0 ? options.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
   const files: ScannedFile[] = [];
-  const skipped: SkipCounts = { binary: 0, lockfile: 0, tooLarge: 0, gitignored: 0 };
+  const skipped: SkipCounts = {
+    binary: 0,
+    lockfile: 0,
+    tooLarge: 0,
+    gitignored: 0,
+    unsupportedType: 0,
+    empty: 0,
+    excluded: 0,
+  };
+
+  const exclusions = await buildExclusions(root, options.excludePaths ?? NO_EXCLUDED_PATHS);
 
   for await (const walkedFile of walk(root, options.followSymlinks)) {
     const relPath = relative(root, walkedFile.path).split("\\").join("/");
 
-    if (ALWAYS_EXCLUDE.some((pattern) => pattern.test(relPath))) continue;
-    if (isGitignored(relPath, walkedFile.ignoreContexts)) {
-      skipped.gitignored++;
+    if (exclusions.absolute.has(walkedFile.path) || exclusions.relative.has(relPath)) {
       continue;
     }
-    if (LOCKFILE_NAMES.has(basename(relPath))) {
-      skipped.lockfile++;
+
+    const nameReason = classifyByName(relPath, walkedFile.ignoreContexts);
+    if (nameReason !== null) {
+      skipped[nameReason]++;
       continue;
     }
 
@@ -240,16 +364,13 @@ export async function scan(options: ScanOptions): Promise<ScanResult> {
     } catch {
       continue;
     }
-    if (!fileStat.isFile() || fileStat.size === 0) continue;
-    if (fileStat.size > maxBytes) {
-      skipped.tooLarge++;
+    if (!fileStat.isFile()) continue;
+
+    const contentReason = classifyByContent(relPath, fileStat.size, maxBytes);
+    if (contentReason !== null) {
+      skipped[contentReason]++;
       continue;
     }
-
-    const dotIndex = relPath.lastIndexOf(".");
-    const extension = dotIndex >= 0 ? relPath.substring(dotIndex).toLowerCase() : "";
-    const name = basename(relPath);
-    if (!TEXT_EXT_HINT.has(extension) && !TEXT_EXT_HINT.has(name)) continue;
 
     let content;
     try {
@@ -270,7 +391,7 @@ export async function scan(options: ScanOptions): Promise<ScanResult> {
     });
   }
 
-  files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  files.sort((a, b) => comparePaths(a.relPath, b.relPath));
   return { root, files, skipped };
 }
 
@@ -278,8 +399,9 @@ export function countLines(text: string): number {
   if (text.length === 0) return 0;
   let lines = 0;
   for (let index = 0; index < text.length; index++) {
-    if (text.charCodeAt(index) === 10) lines++;
+    if (text.charCodeAt(index) === LINE_FEED) lines++;
   }
-  if (text.charCodeAt(text.length - 1) !== 10) lines++;
+  // A final line without a trailing newline still counts as a line.
+  if (text.charCodeAt(text.length - 1) !== LINE_FEED) lines++;
   return lines;
 }
