@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, writeFile, mkdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scan, countLines } from "../src/scanner.js";
+import { scan, countLines, comparePaths } from "../src/scanner.js";
 
 let work: string;
 
@@ -36,7 +36,15 @@ describe("scan: basic discovery", () => {
 
     expect(result.root).toBe(await realpath(work));
     expect(result.files.map((file) => file.relPath)).toEqual([".gitignore", "keep.ts"]);
-    expect(result.skipped).toEqual({ binary: 1, lockfile: 1, tooLarge: 1, gitignored: 1 });
+    expect(result.skipped).toEqual({
+      binary: 1,
+      lockfile: 1,
+      tooLarge: 1,
+      gitignored: 1,
+      unsupportedType: 1,
+      empty: 1,
+      excluded: 0,
+    });
   });
 
   it("finds text files at the root", async () => {
@@ -143,6 +151,153 @@ describe("scan: deterministic ordering", () => {
     await write("m.ts", "m\n");
     const { files } = await scan({ root: work, maxFileBytes: 1024, followSymlinks: false });
     expect(files.map((f) => f.relPath)).toEqual(["a.ts", "m.ts", "z.ts"]);
+  });
+
+  it("orders by code unit, not by locale", async () => {
+    // `localeCompare` sorted "Ärger.ts" before "zebra.ts" under a Swedish
+    // locale but after it under the C locale. The `--json` contract promises
+    // a stable shape, so the order must not depend on the machine locale.
+    await write("zebra.ts", "z\n");
+    await write("Ärger.ts", "a\n");
+    await write("apple.ts", "a\n");
+
+    const { files } = await scan({ root: work, maxFileBytes: 1024, followSymlinks: false });
+
+    const expected = ["apple.ts", "zebra.ts", "Ärger.ts"];
+    expect(files.map((f) => f.relPath)).toEqual(expected);
+  });
+});
+
+describe("comparePaths", () => {
+  it("orders by UTF-16 code unit", () => {
+    expect(comparePaths("a", "b")).toBe(-1);
+    expect(comparePaths("b", "a")).toBe(1);
+    expect(comparePaths("a", "a")).toBe(0);
+  });
+
+  it("is not locale-sensitive", () => {
+    // Under a Swedish locale, "zebra" sorts before "Ärger" because "Ä" is
+    // treated as A-with-ring and therefore sorts after "z". Code-unit order
+    // puts "Ä" (U+00C4) last.
+    expect(comparePaths("zebra.ts", "Ärger.ts")).toBe(-1);
+  });
+});
+
+describe("scan: excluded paths", () => {
+  it("omits paths listed in excludePaths", async () => {
+    await write("keep.ts", "keep\n");
+    await write("ctx.md", "# previous digest\n");
+
+    const { files } = await scan({
+      root: work,
+      maxFileBytes: 1024,
+      followSymlinks: false,
+      excludePaths: [join(work, "ctx.md")],
+    });
+
+    expect(files.map((f) => f.relPath)).toEqual(["keep.ts"]);
+  });
+
+  it("omits an excluded path that does not exist yet", async () => {
+    await write("keep.ts", "keep\n");
+
+    const { files } = await scan({
+      root: work,
+      maxFileBytes: 1024,
+      followSymlinks: false,
+      excludePaths: [join(work, "not-created-yet.md")],
+    });
+
+    expect(files.map((f) => f.relPath)).toEqual(["keep.ts"]);
+  });
+
+  it("omits an excluded path given as a relative path", async () => {
+    await write("keep.ts", "keep\n");
+    await write("ctx.md", "# previous digest\n");
+
+    const { files } = await scan({
+      root: work,
+      maxFileBytes: 1024,
+      followSymlinks: false,
+      excludePaths: ["ctx.md"],
+    });
+
+    expect(files.map((f) => f.relPath)).toEqual(["keep.ts"]);
+  });
+});
+
+describe("scan: invalid root", () => {
+  it("throws when the scan path does not exist", async () => {
+    await expect(
+      scan({ root: join(work, "does-not-exist"), maxFileBytes: 1024, followSymlinks: false }),
+    ).rejects.toThrow(/scan path does not exist/);
+  });
+
+  it("throws when the scan path is a file rather than a directory", async () => {
+    await write("a.ts", "x\n");
+    await expect(
+      scan({ root: join(work, "a.ts"), maxFileBytes: 1024, followSymlinks: false }),
+    ).rejects.toThrow(/scan path is not a directory/);
+  });
+});
+
+describe("scan: skip counters cover every drop reason", () => {
+  it("counts files dropped for an unsupported type", async () => {
+    await write("keep.ts", "ok\n");
+    await write("data.unknown", "text\n");
+
+    const { skipped } = await scan({ root: work, maxFileBytes: 1024, followSymlinks: false });
+
+    expect(skipped.unsupportedType).toBe(1);
+  });
+
+  it("counts files dropped because they are empty", async () => {
+    await write("keep.ts", "ok\n");
+    await write("empty.ts", "");
+
+    const { skipped } = await scan({ root: work, maxFileBytes: 1024, followSymlinks: false });
+
+    expect(skipped.empty).toBe(1);
+  });
+
+  it("counts files dropped by the always-excluded rules", async () => {
+    await write("keep.ts", "ok\n");
+    await write("node_modules/lib/index.js", "drop\n");
+    await write("dist/bundle.js", "drop\n");
+
+    const { skipped } = await scan({ root: work, maxFileBytes: 1024, followSymlinks: false });
+
+    expect(skipped.excluded).toBe(2);
+  });
+
+  it("accounts for every file the scan did not return", async () => {
+    await write("keep.ts", "ok\n");
+    await write("empty.ts", "");
+    await write("data.unknown", "text\n");
+    await write("package-lock.json", "{}\n");
+    await write("node_modules/lib/index.js", "drop\n");
+    await write("big.ts", "x".repeat(500));
+    await write(".gitignore", "ignored.ts\n");
+    await write("ignored.ts", "drop\n");
+
+    const { files, skipped } = await scan({
+      root: work,
+      maxFileBytes: 100,
+      followSymlinks: false,
+    });
+
+    const accounted =
+      files.length +
+      skipped.binary +
+      skipped.lockfile +
+      skipped.tooLarge +
+      skipped.gitignored +
+      skipped.unsupportedType +
+      skipped.empty +
+      skipped.excluded;
+
+    // Every file written above is either returned or counted once.
+    expect(accounted).toBe(8);
   });
 });
 

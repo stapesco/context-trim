@@ -1,7 +1,7 @@
 {
   "name": "stapes-context-trim",
-  "version": "0.1.2",
-  "description": "Strip a codebase to the essentials for an AI prompt. Respects .gitignore. Skips node_modules, lockfiles, binaries, build output. One command, no install, no cloud, no API key. Stable --json summary for AI agents. Tested on Node 24.",
+  "version": "0.1.3",
+  "description": "Strip a codebase to the essentials for an AI prompt. Respects .gitignore. Skips node_modules, lockfiles, binaries, build output. One command, no install, no cloud, no API key. Stable --json summary for AI agents. Requires Node 22.12 or newer.",
 
   "type": "module",
   "bin": {
@@ -52,15 +52,15 @@
     "url": "https://github.com/stapesco/context-trim"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "typescript": "^5.3.0",
-    "vitest": "^1.6.0"
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "dependencies": {
-    "commander": "^11.1.0",
-    "ignore": "^5.3.0"
+    "commander": "^15.1.0",
+    "ignore": "^7.0.14"
   }
 }

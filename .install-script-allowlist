@@ -1,0 +1,13 @@
+# Dependencies permitted to run install lifecycle scripts.
+#
+# Format: <package-name>  # reason
+#
+# The gate blocks a commit that adds a dependency without a recorded
+# decision here. A package listed below has been reviewed: its install
+# scripts either do not exist or do not run untrusted code at install time.
+
+commander  # no install/postinstall scripts; ships a prebuilt ESM bundle
+ignore  # no install/postinstall scripts; pure JavaScript, build is a dev step
+typescript  # no install/postinstall scripts; the compiler is a plain binary
+vitest  # no install/postinstall scripts; test runner only, never shipped
+@types/node  # type declarations only; no runtime code and no install scripts

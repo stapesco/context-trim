@@ -102,6 +102,9 @@ async function main() {
     root,
     maxFileBytes: opts.maxFileBytes,
     followSymlinks: opts.followSymlinks,
+    // The digest this run writes must not be scanned as source on the next
+    // run, or the output grows with every invocation.
+    excludePaths: opts.out ? [resolve(opts.out)] : [],
   });
 
   if (opts.verbose) {

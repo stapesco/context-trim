@@ -85,7 +85,15 @@ describe("CLI: --json schema (contract)", () => {
     expect(parsed.fileCount).toBe(2);
     expect(parsed.totalBytes).toBeGreaterThan(0);
     expect(parsed.elapsedMs).toBeGreaterThanOrEqual(0);
-    expect(parsed.skipped).toEqual({ binary: 1, lockfile: 1, tooLarge: 1, gitignored: 1 });
+    expect(parsed.skipped).toEqual({
+      binary: 1,
+      lockfile: 1,
+      tooLarge: 1,
+      gitignored: 1,
+      unsupportedType: 0,
+      empty: 1,
+      excluded: 0,
+    });
 
     // fileList carries the kept files with the per-file metadata.
     expect(Array.isArray(parsed.fileList)).toBe(true);
@@ -126,6 +134,62 @@ describe("CLI: --json schema (contract)", () => {
     const parsedFile = JSON.parse(fromFile);
     expect(parsedFile).toHaveProperty("fileList");
     expect(parsedFile.fileCount).toBe(2);
+  });
+});
+
+describe("CLI: invalid scan path", () => {
+  it("exits 1 with a message when the scan path does not exist", async () => {
+    const result = await runCli([join(work, "does-not-exist"), "--json"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/scan path does not exist/);
+    // A failed run must not emit a JSON summary that looks like a clean scan.
+    expect(result.stdout).toBe("");
+  });
+
+  it("exits 1 with a message when the scan path is a file", async () => {
+    await writeFixture("a.ts", "x\n");
+    const result = await runCli([join(work, "a.ts"), "--json"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/scan path is not a directory/);
+    expect(result.stdout).toBe("");
+  });
+
+  it("exits 1 in markdown mode too", async () => {
+    const result = await runCli([join(work, "does-not-exist")]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/scan path does not exist/);
+  });
+});
+
+describe("CLI: --out does not scan its own output", () => {
+  it("keeps the digest the same size across repeated runs", async () => {
+    await writeFixture("a.ts", "export const a = 1;\n");
+    const outPath = join(work, "ctx.md");
+
+    const first = await runCli([work, "--out", outPath]);
+    expect(first.status).toBe(0);
+    const firstSize = (await readFile(outPath)).byteLength;
+
+    const second = await runCli([work, "--out", outPath]);
+    expect(second.status).toBe(0);
+    const secondSize = (await readFile(outPath)).byteLength;
+
+    // Before the fix the digest absorbed its own previous output and grew
+    // with every run.
+    expect(secondSize).toBe(firstSize);
+  });
+
+  it("excludes the --out target from the scanned file list", async () => {
+    await writeFixture("a.ts", "export const a = 1;\n");
+    // A previous digest is already sitting in the scan root.
+    await writeFixture("ctx.md", "# previous digest\n");
+
+    const result = await runCli([work, "--json", "--out", join(work, "summary.json")]);
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(await readFile(join(work, "summary.json"), "utf8"));
+    const paths = parsed.fileList.map((f: { path: string }) => f.path);
+    // The --out target is never scanned, so it never appears in the summary.
+    expect(paths).not.toContain("summary.json");
   });
 });
 
